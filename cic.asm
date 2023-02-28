@@ -19,6 +19,7 @@
     NoEntity = 0
     Cursor = 1
     CursorLarge = 2
+    Mothership = 3
 .endscope
 
 .scope Banktype
@@ -26,9 +27,11 @@
     TitleBank = 1
 .endscope
 
-.scope PlayerflagVal
-    NoDraw = 1
-    DrawWithHat = 2 
+.scope CursorState 
+    init = 0
+    free = 1
+    grid = 2
+    inactive = 3
 .endscope
 
 .scope ButtonReturn
@@ -41,12 +44,14 @@
     type .byte ; each entity has its own type assigned, if you somehow make more than 255 entities than idk what to do
     xpos .byte ; x position
     ypos .byte ; y position
-    attributes .byte ;
-    collisionlayer .byte ; which of the 4 active palettes this sprite should use
-    generalpurpose .byte ; this has no specific use, it can be defined on a per entity basis
+    xpossub .byte
+    ypossub .byte
+    attributes .byte ; pallette, flip, etc
+    generalpurpose .byte ; this has no specific use, it can be defined on a per entity basis, typically for a behaviour state machine
     animationframe .byte
-    animationtimer .byte
+    ; animationtimer .byte
     flags .byte
+    health .byte
 .endstruct
 
 .scope flagtype
@@ -54,6 +59,14 @@
     NoProcess = 1
     FlipH = 2
     FlipV = 4
+    Selectable = 8
+.endscope
+
+.scope tiletype
+    Empty = 0 
+    Nebula = 1
+    Planet = 2
+    Asteroid = 3  
 .endscope
 
 .segment "ZEROPAGE" ; 0-FF. One page of ram that is faster access than rest of the ram. Use for values most frequently used
@@ -88,10 +101,14 @@
     spritebufferposition: .res 1
     temp: .res 1
     temp2: .res 1
+    temp3: .res 1
     rng: .res 1 ; rng is stored here once a frame
     rectangle1: .res 4 
     rectangle2: .res 4
     drawflags: .res 1 ; 
+    cursorstate: .res 1
+    cursorindex: .res 1
+    selectedobject: .res 1
 
     PPUControl = $2000 
     PPUMask= $2001 
@@ -103,6 +120,8 @@
     PPUData = $2007 
     OAMDMA = $4014
 
+    ; CURSORSPEED = #200
+
 .segment "OAM"
 SpriteBuffer: .res 256        ; sprite OAM data to be uploaded by DMA
 
@@ -112,7 +131,8 @@ SpriteBuffer: .res 256        ; sprite OAM data to be uploaded by DMA
     CollisionMap: .res 240
     CurrentBackgroundPalette: .res 16
     GameState: .res 1
-
+    Vector: .res 2
+    Vector2: .res 2
 
 .segment "STARTUP" ; this is called when the console starts. Init a few things here, otherwise little here
     Reset:
@@ -304,9 +324,29 @@ jsr famistudio_init
 lda #$00
 jsr famistudio_music_play
 
-LDX #$10
+LDX #$60
 LDY #$30
 LDA #EntityType::Cursor
+JSR SpawnEntity
+
+ldx #$50
+LDY #$30
+LDA #EntityType::Mothership
+JSR SpawnEntity
+
+LDX #$30
+LDY #$40
+LDA #EntityType::Mothership
+JSR SpawnEntity
+
+LDX #$90
+LDY #$50
+LDA #EntityType::Mothership
+JSR SpawnEntity
+
+LDX #$70
+LDY #$60
+LDA #EntityType::Mothership
 JSR SpawnEntity
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -419,6 +459,7 @@ SelectGameStatePath:
 
 DoGameLogic:
     JSR ReadButtons
+    JSR ProcessPlayerInput
     JSR ProcessEntities
     RTS 
 
@@ -427,6 +468,10 @@ DoGameLogic:
 NoSpawn:
     RTS
 ; we never go here
+
+ProcessPlayerInput:
+    RTS
+
 
 ProcessEntities:
     LDX #$00
@@ -453,6 +498,27 @@ ProcessEntities:
         STA jumppointer+1
         JMP (jumppointer)
 
+    ProcessCursorLarge:
+        LDA entities+Entity::generalpurpose, X
+        ASL 
+        TAY 
+        LDA CursorLargeStateMachine, Y
+        STA jumppointer
+        LDA CursorLargeStateMachine+1, Y
+        STA jumppointer+1
+        JMP (jumppointer)
+
+
+    ProcessMothership:
+        LDA entities+Entity::generalpurpose, X
+        ASL 
+        TAY 
+        LDA MothershipStateMachine, Y
+        STA jumppointer
+        LDA MothershipStateMachine+1, Y
+        STA jumppointer+1
+        JMP (jumppointer)
+
 
     ; End step of processing an entity
     ; We shift the current x offset back into A, add the size of the entity struct, then put it back in A
@@ -470,8 +536,11 @@ RTS
 
 CursorStateMachine:
     .word CursorInit;0
-    .word CursorActive
+    .word CursorSnap
+    .word CursorGrid
+    .word CursorFree
     .word CursorInactive
+
 
 CursorInit:
     LDA #%00000000
@@ -479,119 +548,493 @@ CursorInit:
     ; LDA #$00
     ; JSR InitAnimation
     LDA #$10 
-    STA entities+Entity::animationtimer, X  
-    LDA #$01
-    STA entities+Entity::collisionlayer, X 
+    ; STA entities+Entity::animationtimer, X  
     LDA #$01
     STA entities+Entity::generalpurpose, X
 
     JMP EntityComplete
 
-CursorActive:
+CursorGrid:
+    LDA framecount
+    BEQ :+
+    JMP EntityComplete
+    :
     JSR CheckRight
     CMP #ButtonReturn::Release
     BNE :+
-    LDA entities+Entity::xpos, X
-    CLC 
-    ADC #$08
-    STA entities+Entity::xpos, X
+    LDA #$08
+    STA temp
+    LDA #$00
+    STA temp2 
+    JSR ObjectMove
     :
     JSR CheckLeft
     CMP #ButtonReturn::Release
-    BNE :+
-    LDA entities+Entity::xpos, X
-    SEC 
-    SBC #$08
-    STA entities+Entity::xpos, X
+    BEQ :+
+    LDA #$F8
+    STA temp
+    LDA #$00
+    STA temp2 
+    JSR ObjectMove    
     :
     JSR CheckUp
     CMP #ButtonReturn::Release
     BNE :+
-    LDA entities+Entity::ypos, X
-    SEC 
-    SBC #$08
-    STA entities+Entity::ypos, X
+    LDA #$00
+    STA temp
+    LDA #$F8
+    STA temp2 
+    JSR ObjectMove    
     :
     JSR CheckDown
     CMP #ButtonReturn::Release
     BNE :+
-    LDA entities+Entity::ypos, X
-    CLC 
-    ADC #$08
-    STA entities+Entity::ypos, X
+    LDA #$00
+    STA temp
+    LDA #$08
+    STA temp2 
+    JSR ObjectMove    
     :
     JMP EntityComplete
+
+CursorFree:
+    JSR CheckRight
+    CMP #ButtonReturn::Release
+    BNE :+
+    JMP EntityComplete
+    :
+    LDA #$01
+    STA temp
+    LDA #$00
+    STA temp2 
+    JSR ObjectMove
+JMP EntityComplete
+
+CursorSnap:
+    LDA framecount
+    JSR CheckRight
+    CMP ButtonReturn::Release
+    BNE :+
+    JSR CursorFindNearestRight
+    LDY temp2
+    LDA entities+Entity::xpos, Y
+    STA entities+Entity::xpos, X
+    LDA entities+Entity::ypos, Y 
+    STA entities+Entity::ypos, X
+    :
+
+    JSR CheckLeft
+    CMP ButtonReturn::Release
+    BNE :+
+    JSR CursorFindNearestLeft
+    LDY temp2
+    LDA entities+Entity::xpos, Y
+    STA entities+Entity::xpos, X
+    LDA entities+Entity::ypos, Y 
+    STA entities+Entity::ypos, X
+    :
+
+    JSR CheckUp
+    CMP ButtonReturn::Release
+    BNE :+
+    JSR CursorFindNearestUp
+    LDY temp2
+    LDA entities+Entity::xpos, Y
+    STA entities+Entity::xpos, X
+    LDA entities+Entity::ypos, Y 
+    STA entities+Entity::ypos, X
+    :
+
+    JSR CheckDown
+    CMP ButtonReturn::Release
+    BNE :+
+    JSR CursorFindNearestDown
+    LDY temp2
+    LDA entities+Entity::xpos, Y
+    STA entities+Entity::xpos, X
+    LDA entities+Entity::ypos, Y 
+    STA entities+Entity::ypos, X
+    :
+
+JMP EntityComplete
 
 CursorInactive:
     JMP EntityComplete
 
-InitAnimation:
-    STA animationtrack
- ; animation number in A 
-    ASL 
-    TAY 
-    LDA AnimationStringsPlayer, Y 
-    STA jumppointer
-    LDA AnimationStringsPlayer+1,Y 
-    STA jumppointer+1
+
+FindCursorObjects:
+    LDX #$00
+    FindCursorObjectsLoop:
+        LDA entities+Entity::flags, X
+        AND #%00001000
+        BNE CursorEntityComplete
+
+        JSR SpriteCollide
+    
+    CursorEntityComplete:
+        TXA 
+        CLC
+        ADC #.sizeof(Entity)
+        TAX
+        CMP #entity_mem
+        BEQ :+
+        JMP FindCursorObjectsLoop
+        :
+RTS
+
+CursorFindNearestRight:
+    LDA #$FF 
+    STA temp ; nearest distance
     LDY #$00
-    LDA (jumppointer), Y
-    STA entities+Entity::animationframe, X 
-    INY 
-    LDA (jumppointer), Y 
-    STA entities+Entity::animationtimer, X
-    LDA #$00
-    STA animationtracktimer
-
-RTS 
-
-AdvancePlayerAnimation:
-    DEC entities+Entity::animationtimer, X 
-    BEQ :+
-    RTS 
-    :
-
-    LDA animationtrack
-    ASL 
-    TAY 
-    LDA AnimationStringsPlayer, Y 
-    STA jumppointer
-    LDA AnimationStringsPlayer+1,Y 
-    STA jumppointer+1
-
-
-    LDA animationtracktimer
-    TAY 
-    LDA (jumppointer), Y
-    CMP #$FF 
-    BNE :+
-        LDA #$00
+    STY temp2 ; nearest entity
+    STX temp3 ; ourself
+    FindNearestRightLoop:
+        CPY #entity_mem
+        BEQ EndFindNearestRight
+        ;Check the entity is not ourself
+        CPY temp3 
+        BEQ NearestRightLoopEndEntity
+        ;Check the entity is selectable
+        LDA entities+Entity::flags, Y 
+        AND flagtype::Selectable
+        BNE NearestRightLoopEndEntity
+        ; Check the entity is not the same x
+        LDA entities+Entity::xpos, Y 
+        CMP entities+Entity::xpos, X
+        BEQ NearestRightLoopEndEntity
+        ; Check if the entity is to the right
+        LDA entities+Entity::xpos, Y 
+        SEC 
+        SBC entities+Entity::xpos, X 
+        BCC NearestRightLoopEndEntity
+        ;Check if distance is less than the max
+        LDA temp 
+        CMP entities+Entity::xpos, Y
+        BCC NearestRightLoopEndEntity
+        LDA entities+Entity::xpos, y
+        STA temp
+        STY temp2
+        ; JMP EndFindNearestRight
+    NearestRightLoopEndEntity:
+        TYA 
+        CLC 
+        ADC #.sizeof(Entity)
         TAY 
-        LDA (jumppointer), Y 
-        STA entities+Entity::animationframe, X
-        INY 
-        LDA (jumppointer), Y 
-        STA entities+Entity::animationtimer, X
-        INY 
-        TYA
-        STA animationtracktimer
-        RTS
-    :
-    CMP #$FE 
-    BNE :+
-        INY 
-        LDA (jumppointer), Y 
-        JSR InitAnimation
-        RTS
-    :
-    STA entities+Entity::animationframe, X 
-    INY 
-    LDA (jumppointer), Y 
-    STA entities+Entity::animationtimer, X
-    INC animationtracktimer
-    INC animationtracktimer
+        JMP FindNearestRightLoop
+    EndFindNearestRight:
+RTS
 
-RTS 
+CursorFindNearestLeft:
+    LDA #$00
+    STA temp ; nearest distance
+    LDY #$00
+    STY temp2 ; nearest entity
+    STX temp3 ; ourself
+    FindNearestLeftLoop:
+        CPY #entity_mem
+        BEQ EndFindNearestLeft
+        ;Check the entity is not ourself
+        CPY temp3 
+        BEQ NearestLeftLoopEndEntity
+        ;Check the entity is selectable
+        LDA entities+Entity::flags, Y 
+        AND flagtype::Selectable
+        BNE NearestLeftLoopEndEntity
+        ; Check the entity is not the same x
+        LDA entities+Entity::xpos, Y 
+        CMP entities+Entity::xpos, X
+        BEQ NearestLeftLoopEndEntity
+        ; Check if the entity is to the left
+        LDA entities+Entity::xpos, X 
+        SEC 
+        SBC entities+Entity::xpos, Y 
+        BCC NearestLeftLoopEndEntity
+        ;Check if distance less than current max dist
+        LDA temp 
+        CMP entities+Entity::xpos, Y
+        BCS NearestLeftLoopEndEntity
+        LDA entities+Entity::xpos, y
+        STA temp
+        STY temp2
+        ; JMP EndFindNearestRight
+    NearestLeftLoopEndEntity:
+        TYA 
+        CLC 
+        ADC #.sizeof(Entity)
+        TAY 
+        JMP FindNearestLeftLoop
+    EndFindNearestLeft:
+RTS
+
+CursorFindNearestDown:
+    LDA #$FF 
+    STA temp ; nearest distance
+    LDY #$00
+    STY temp2 ; nearest entity
+    STX temp3 ; ourself
+    FindNearestDownLoop:
+        CPY #entity_mem
+        BEQ EndFindNearestDown
+        ;Check the entity is not ourself
+        CPY temp3 
+        BEQ NearestDownLoopEndEntity
+        ;Check the entity is selectable
+        LDA entities+Entity::flags, Y 
+        AND flagtype::Selectable
+        BNE NearestDownLoopEndEntity
+        ; Check the entity is not the same x
+        LDA entities+Entity::ypos, Y 
+        CMP entities+Entity::ypos, X
+        BEQ NearestDownLoopEndEntity
+        ; Check if the entity is to the Down
+        LDA entities+Entity::ypos, Y 
+        SEC 
+        SBC entities+Entity::ypos, X 
+        BCC NearestDownLoopEndEntity
+        ;Check if distance is less than the max
+        LDA temp 
+        CMP entities+Entity::ypos, Y
+        BCC NearestDownLoopEndEntity
+        LDA entities+Entity::ypos, y
+        STA temp
+        STY temp2
+        ; JMP EndFindNearestDown
+    NearestDownLoopEndEntity:
+        TYA 
+        CLC 
+        ADC #.sizeof(Entity)
+        TAY 
+        JMP FindNearestDownLoop
+    EndFindNearestDown:
+RTS
+
+CursorFindNearestUp:
+    LDA #$00
+    STA temp ; nearest distance
+    LDY #$00
+    STY temp2 ; nearest entity
+    STX temp3 ; ourself
+    FindNearestUpLoop:
+        CPY #entity_mem
+        BEQ EndFindNearestLeft
+        ;Check the entity is not ourself
+        CPY temp3 
+        BEQ NearestUpLoopEndEntity
+        ;Check the entity is selectable
+        LDA entities+Entity::flags, Y 
+        AND flagtype::Selectable
+        BNE NearestUpLoopEndEntity
+        ; Check the entity is not the same x
+        LDA entities+Entity::ypos, Y 
+        CMP entities+Entity::ypos, X
+        BEQ NearestLeftLoopEndEntity
+        ; Check if the entity is to the left
+        LDA entities+Entity::ypos, X 
+        SEC 
+        SBC entities+Entity::ypos, Y 
+        BCC NearestUpLoopEndEntity
+        ;Check if distance less than current max dist
+        LDA temp 
+        CMP entities+Entity::ypos, Y
+        BCS NearestUpLoopEndEntity
+        LDA entities+Entity::ypos, y
+        STA temp
+        STY temp2
+        ; JMP EndFindNearestRight
+    NearestUpLoopEndEntity:
+        TYA 
+        CLC 
+        ADC #.sizeof(Entity)
+        TAY 
+        JMP FindNearestLeftLoop
+    EndFindNearestUp:
+RTS
+
+CursorSelectObject:
+    LDA cursorindex
+    STA selectedobject
+RTS
+
+CursorSetGrid:
+    LDA #CursorState::grid
+    JSR CursorSwitchMode
+RTS
+
+CursorSetFree:
+    LDA #CursorState::free
+    JSR CursorSwitchMode
+RTS
+
+CursorSetInactive:
+    LDA #CursorState::inactive
+    JSR CursorSwitchMode
+RTS
+
+
+; IN A: desired cursorstate
+CursorSwitchMode:
+    PHA
+    LDY #$00
+    CursorSwitchLoop:
+        LDA entities+Entity::type, Y 
+        CMP #EntityType::Cursor
+        BNE CursorSwitchEntityComplete
+        PLA
+        STA entities+Entity::generalpurpose, y
+        RTS 
+    CursorSwitchEntityComplete:
+        TYA 
+        CLC 
+        ADC #.sizeof(Entity)
+        TAY 
+        CMP #entity_mem
+        BEQ :+
+        JMP CursorSwitchLoop
+        :   
+        PLA
+RTS
+
+MothershipStateMachine:
+    .word MothershipInit;0
+    .word MothershipActive
+    .word MothershipInactive
+
+MothershipInit:
+    LDA #$01
+    STA entities+Entity::generalpurpose, X
+    JMP EntityComplete
+
+MothershipActive:
+    ; LDA framecount
+    ; BEQ :+
+    ; JMP EntityComplete
+    ; :
+    ; LDA #$A0
+    ; STA Vector2
+    ; STA Vector2+1
+    ; LDA entities+Entity::xpos, X 
+    ; STA Vector
+    ; LDA entities+Entity::ypos, x
+    ; STA Vector+1
+    ; JSR MathsGetDirectionTo
+    ; LDA entities+Entity::xpos, X
+    ; CLC 
+    ; ADC Vector
+    ; LDA entities+Entity::ypos, X
+    ; CLC 
+    ; ADC Vector+1 
+    ; STA entities+Entity::ypos, X
+    JMP EntityComplete
+
+MothershipInactive:
+    JMP EntityComplete
+
+CursorLargeStateMachine:
+    .word CursorLargeInit
+
+CursorLargeInit:
+    JMP EntityComplete
+
+ObjectMoveTowardsPosition:
+    ; get vector
+    RTS
+
+;subx in temp1 suby in temp2
+ObjectMoveSub:
+    LDA entities+Entity::xpossub, X
+    CLC 
+    ADC temp
+    STA entities+Entity::xpossub, X 
+    LDA entities+Entity::xpos, X 
+    ADC #$00
+    STA entities+Entity::xpos, X
+
+    LDA entities+Entity::ypossub, X
+    CLC 
+    ADC temp2
+    STA entities+Entity::ypossub, X 
+    LDA entities+Entity::ypos, X 
+    ADC #$00
+    STA entities+Entity::ypos, X
+RTS
+
+ObjectMove:
+    LDA entities+Entity::xpos, X 
+    CLC 
+    ADC temp
+    STA entities+Entity::xpos, X
+    LDA entities+Entity::ypos, X 
+    CLC 
+    ADC temp2
+    STA entities+Entity::ypos, X
+RTS
+; InitAnimation:
+;     STA animationtrack
+;  ; animation number in A 
+;     ASL 
+;     TAY 
+;     LDA AnimationStringsPlayer, Y 
+;     STA jumppointer
+;     LDA AnimationStringsPlayer+1,Y 
+;     STA jumppointer+1
+;     LDY #$00
+;     LDA (jumppointer), Y
+;     STA entities+Entity::animationframe, X 
+;     INY 
+;     LDA (jumppointer), Y 
+;     STA entities+Entity::animationtimer, X
+;     LDA #$00
+;     STA animationtracktimer
+
+; RTS 
+
+; AdvancePlayerAnimation:
+;     DEC entities+Entity::animationtimer, X 
+;     BEQ :+
+;     RTS 
+;     :
+
+;     LDA animationtrack
+;     ASL 
+;     TAY 
+;     LDA AnimationStringsPlayer, Y 
+;     STA jumppointer
+;     LDA AnimationStringsPlayer+1,Y 
+;     STA jumppointer+1
+
+
+;     LDA animationtracktimer
+;     TAY 
+;     LDA (jumppointer), Y
+;     CMP #$FF 
+;     BNE :+
+;         LDA #$00
+;         TAY 
+;         LDA (jumppointer), Y 
+;         STA entities+Entity::animationframe, X
+;         INY 
+;         LDA (jumppointer), Y 
+;         STA entities+Entity::animationtimer, X
+;         INY 
+;         TYA
+;         STA animationtracktimer
+;         RTS
+;     :
+;     CMP #$FE 
+;     BNE :+
+;         INY 
+;         LDA (jumppointer), Y 
+;         JSR InitAnimation
+;         RTS
+;     :
+;     STA entities+Entity::animationframe, X 
+;     INY 
+;     LDA (jumppointer), Y 
+;     STA entities+Entity::animationtimer, X
+;     INC animationtracktimer
+;     INC animationtracktimer
+
+; RTS 
 
 
 ClearEntity:
@@ -601,16 +1044,37 @@ ClearEntity:
     STA entities+Entity::xpos, X
     STA entities+Entity::ypos, X
     STA entities+Entity::attributes, X
-    STA entities+Entity::collisionlayer, X
     STA entities+Entity::generalpurpose, X
     STA entities+Entity::animationframe, X
-    STA entities+Entity::animationtimer, X
+    ; STA entities+Entity::animationtimer, X
     JMP EntityComplete
 
 ClearEntityUnsafe: ;
     LDA #$00
     STA entities+Entity::type, X 
     JMP EntityComplete
+
+; ;put the entity type you want to move into a
+; ; x movement into temp1
+; ; y movement into temp2
+; MoveEntity:
+
+;;;;
+; MATHS AGHGH
+;;;;
+
+MathsGetDirectionTo:
+    LDA Vector
+    SEC 
+    SBC Vector2
+    STA Vector
+
+    LDA Vector+1
+    SEC 
+    SBC Vector2+1
+    STA Vector+1
+RTS
+
 
 ; BEFORE CALL:
 ;  - load screen data address into 'world'
@@ -763,21 +1227,35 @@ SpawnEntity:
         STA entities+Entity::xpos, X
         PLA 
         STA entities+Entity::type, X
+        ; set special attributes for this object while we have the type
+        JSR SetObjectProperties
         LDA temp 
         STA entities+Entity::attributes, X 
-        LDA temp2
-        STA entities+Entity::collisionlayer, X
-        ; some entities will override temp in their init, but there are circumstances where you want e.g. the attributes of the entity that spawned this one
         LDA #$00
         STA entities+Entity::generalpurpose, X 
-        STA entities+Entity::animationtimer, X 
-        ; STA entities+Entity::collisionlayer, X 
+        ; STA entities+Entity::animationtimer, X
         RTS 
 EndEurydiceSpawn:
     PLA 
     PLA 
     PLA
     RTS
+
+; Entered when spawning
+SetObjectProperties:
+    LDA entities+Entity::type, X
+    ASL 
+    TAY 
+    LDA EntityProperties, Y 
+    STA jumppointer
+    LDA EntityProperties+1, Y
+    STA jumppointer+1
+    LDY #$00
+    LDA (jumppointer), Y
+    ; first byte is whether selectable
+    ORA entities+Entity::flags, X
+    STA entities+Entity::flags, X
+RTS
 
 IncFrameCount:
     INC framecount
@@ -2035,10 +2513,7 @@ SpriteCollide:
     TXA 
     PHA 
     STA temp ; save your own position so it can be skipped
-    ; first store your own collisionbit
-    LDA entities+Entity::collisionlayer, X
-    STA temp2 
-
+    
     LDA entities+Entity::xpos, X
     STA rectangle1
     CLC 
@@ -2050,17 +2525,8 @@ SpriteCollide:
     ADC #$07
     STA rectangle1+3
  
-    ; compare collision bits
     LDX #$00
-    ; LDA temp2
-    ; BEQ CollideSpriteComplete
     SpriteCollideLoop:
-    LDA entities+Entity::collisionlayer, X
-    BEQ CollideSpriteComplete
-    AND temp2
-    BNE :+
-    JMP CollideSpriteComplete
-    :
     CPX temp 
     BEQ CollideSpriteComplete
     LDA entities+Entity::type, X 
@@ -2111,6 +2577,41 @@ EndSpriteCollide:
     TAX 
     LDA #$FF
     RTS
+
+;put the object offset number in X before jumping here so it can be excluded
+; leaves the nearest object in temp1
+NearestSpriteRight:
+    LDA #$FF
+    STA temp2 ; furthest right distance so far
+    LDA #$00 
+    STX temp ; closest entity holder 
+    LDY #$00
+    NearestSpriteRightLoop:
+    ; check the entity isn't empty
+    LDA entities+Entity::xpos, Y 
+    BEQ NearestSpriteLoopEntityComplete
+    ; check we arent checking ourself
+    CMP EntityType::NoEntity
+    BEQ NearestSpriteLoopEntityComplete
+    ; check if the current entity is to our right
+    LDA entities+Entity::xpos, Y
+    CMP entities+Entity::xpos, X
+    BCC NearestSpriteLoopEntityComplete
+    ; check if the current entity is closer than the closest so far
+    CMP temp2 
+    BCS NearestSpriteLoopEntityComplete
+    STA temp2
+    STY temp
+    NearestSpriteLoopEntityComplete:
+    TYA 
+    CLC 
+    ADC #.sizeof(Entity)
+    TAY 
+    CMP #entity_mem  ; If we have reached the same amount as the mem taken by entities, we have looped over every entity
+    BEQ :+
+    JMP NearestSpriteRightLoop
+    :
+RTS
 
 NMI:            ; this happens once a frame when the draw arm mabob is returning to the top of the screen
     JMP MAINLOOP
@@ -2181,8 +2682,8 @@ OAMBuffer:
         LDA (jumppointer), Y
         CLC 
         ADC entities+Entity::ypos, X
-        SEC 
-        SBC #$01 ; Ypos scanline is off by one and needs correcting 
+        ; SEC 
+        ; SBC #$01 ; Ypos scanline is off by one and needs correcting 
         STY temp
         LDY spritebufferposition
         STA SpriteBuffer, Y
@@ -2240,7 +2741,6 @@ SkipDraw:
 
 DrawCursor:
     ; Check drawflags
-
     LDA entities+Entity::animationframe, X 
     ASL 
     TAY 
@@ -2256,8 +2756,61 @@ DrawCursor:
     :
     JMP DrawSpriteInit
 
+DrawCursorLarge:
+    ; Check drawflags
+    LDA entities+Entity::animationframe, X 
+    ASL 
+    TAY 
+    LDA MetaSpriteListCursorLarge, Y 
+    STA jumppointer
+    LDA MetaSpriteListCursorLarge+1, Y
+    STA jumppointer+1
+    LDY #$00
+    LDA (jumppointer), Y 
+    CMP #$FF
+    BNE :+
+    JMP CheckEndSpriteDraw
+    :
+    JMP DrawSpriteInit
 
 
+DrawMotherShip:
+    ; Check drawflags
+    LDA entities+Entity::animationframe, X 
+    ASL 
+    TAY 
+    LDA MetaSpriteListMothership, Y 
+    STA jumppointer
+    LDA MetaSpriteListMothership+1, Y
+    STA jumppointer+1
+    LDY #$00
+    LDA (jumppointer), Y 
+    CMP #$FF
+    BNE :+
+    JMP CheckEndSpriteDraw
+    :
+    JMP DrawSpriteInit
+
+; object to snap in X
+SnapSpriteToGrid:
+    LDA entities+Entity::xpos, X 
+    CLC
+    ROR 
+    CLC
+    ROR 
+    ROL 
+    ROL 
+    STA entities+Entity::xpos, X
+
+
+    LDA entities+Entity::ypos, X 
+    CLC
+    ROR 
+    CLC
+    ROR 
+    ROL 
+    ROL 
+    STA entities+Entity::ypos, X
 ;;;;;;;;
 ;; DEATH FUNCTIONS
 ;; These are all called from ProcessDestructionStack and MUST return there when they finish
@@ -2360,6 +2913,24 @@ AttributesDefault: ; each attribute byte sets the pallete for a block of pixels
     .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
     .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 
+;;;;
+;Property Lists
+;;;;
+EntityProperties:
+    .word NoProperties
+    .word CursorProperties 
+    .word CursorLargeProperties
+    .word MotherShipProperties
+
+; properties = selectable ->
+NoProperties:
+    .byte $00
+CursorProperties:
+    .byte $00 ; selectable ->
+CursorLargeProperties:
+    .byte $00
+MotherShipProperties:
+    .byte %00001000
 ;;;;;;;;;;;;
 ;;; LOOK UP TABLES
 ;;;;;;;;;;;
@@ -2380,14 +2951,27 @@ DestroyEntityList: ; defines behaviours for when an entity is destroyed
 ProcessEntityList: ; Jump table for processing entities
     .word SkipEntity
     .word ProcessCursor
+    .word ProcessCursorLarge
+    .word ProcessMothership
 
 DrawSpriteList: ; this is a list of sprite definitions
     .word SkipDraw
     .word DrawCursor
+    .word DrawCursorLarge
+    .word DrawMotherShip
 
 MetaSpriteListCursor:
     .word CursorSprite1 ; 0
     .word CursorSprite2 ; 1
+
+MetaSpriteListCursorLarge:
+    .word CursorLargeSprite1 ; 0
+    .word CursorLargeSprite2 ; 1
+
+MetaSpriteListMothership:
+    .word MothershipSprite1
+    .word MothershipSprite2
+
 AnimationStringsPlayer:
     .word AnimationStringPlayerIdle
     .word AnimationStringPlayerRunning
@@ -2398,13 +2982,35 @@ AnimationStringsPlayer:
     .word AnimationStringPlayerFiring
 
 
+
+
 CursorSprite1:
     .byte $00,$01,$00,$00;,$00,$00 ; -> sprite no  -> xoffset -> Yoffset -> fliph -> flipv
     .byte $FF ; termination byte 
 CursorSprite2:
-    .byte $02,$01,$00,$00,$00,$00 ;yoffset -> sprite no -> palette -> xoffset
+    .byte $00,$01,$00,$00;yoffset -> sprite no -> palette -> xoffset
     .byte $FF ; termination byte
 
+CursorLargeSprite1:
+    .byte $00,$03,$00,$00
+    .byte $00,$04,$00,$00
+    .byte $00,$13,$00,$00
+    .byte $00,$14,$00,$00
+    .byte $FF
+
+CursorLargeSprite2:
+    .byte $00,$05,$00,$00
+    .byte $00,$06,$00,$00
+    .byte $00,$15,$00,$00
+    .byte $00,$16,$00,$00
+    .byte $FF
+
+MothershipSprite1:
+    .byte $00,$11,$01,$00;yoffset -> sprite no -> palette -> xoffset
+    .byte $FF ; termination byte
+MothershipSprite2:
+    .byte $00,$11,$01,$00;yoffset -> sprite no -> palette -> xoffset
+    .byte $FF ; termination byte
 
 
 
